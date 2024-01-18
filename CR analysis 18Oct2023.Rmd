@@ -1,0 +1,1756 @@
+---
+title: "Concussion Registry Data Analysis"
+author: "Sara Hyman"
+date: "2023-02-02"
+output: html_document
+---
+
+In this study, we aim to characterize the relationship between the predictors of hypertension/high blood pressure as well as BMI with several outcome variables related to concussion symptom duration, and duration of post-concussion care.
+
+Variables of interest: 
+  Explanatory: 
+    - Hypertension (defined two ways, in order to validate against temporal ambiguity, as concussion itself can cause high blood pressure):
+        - Comprehensive hypertension (defined as a past diagnosis of hypertension or being hypertensive at their visit at hypertension stage 1 or 2)
+        - Prior diagnosis of hypertension 
+    - BMI 
+        - High or low (high being defined as greater than or equal to 25)
+  Outcome:
+    - diagnosis of post concussion syndrome (PCS)
+    - whether follow up was recommended at the patient's last visit 
+    - number of days between injury and last concussion-related follow-up visit 
+    - number of follow up visits 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Setting up our data###
+
+Installing packages: 
+```{r, incluse=FALSE}
+library(readxl) #reading in dataset
+library(MASS) #for creating models 
+library(glmtoolbox) #for creating models 
+library(ggplot2) #creating plots 
+install.packages("egg") #extension of ggplot2
+library(egg) #extension of ggplot2
+library(faraway) #for creating models 
+library(epitools) #basic epidemiological calculations 
+library(survival) #survival analysis 
+install.packages("survminer") #survival analysis 
+library(survminer) #survival analysis 
+library(writexl) #writing out organized data in excel document 
+library(pROC) #AUC curve 
+```
+
+Setting working directory - make sure to change this code if you want to use a WD other than the desktop
+```{r}
+setwd("G:/Concussion Research/Sara's files/s13_01229 Concussion registry/Presentations and publications")
+```
+
+Reading in dataset 
+```{r}
+#Read in dataset 
+concussion_data <- read_excel("CR_data.xlsx") 
+#Choose relevant columns, and name them 
+concussion_data <- concussion_data[,c(2,5,6,10,12,14:29)]
+colnames(concussion_data) <- c("gender", "days_btwn_concussion_and_first_visit", "age", "num_fu", "days_btwn_con_and_last_fu","post_con_syn", "fu_rec", "days_from_no_fu_reccommended", "clin_resolution", "days_btwn_injury_and_res", "hypertension", "BMI_cat", "blood_pressure", "BMI_val", "race", "ethnicity", "fall","trauma", "MVA", "assault", "sports")
+```
+
+###Data management###
+
+Cleaning variables 
+```{r}
+#Recode preexisting hypertension dx and gender to be binary 0,1
+concussion_data$hypertension<-ifelse(concussion_data$hypertension==2,0,1)
+concussion_data$gender<-ifelse(concussion_data$gender==2,1,0)
+#Make sure all categorical variables are understood to be categorical by the computer (factor() function)
+concussion_data$post_con_syn<-factor(concussion_data$post_con_syn)
+concussion_data$fu_rec<-factor(concussion_data$fu_rec)
+concussion_data$clin_resolution<-factor(concussion_data$clin_resolution)
+concussion_data$hypertension<-factor(concussion_data$hypertension)
+concussion_data$BMI_cat<-factor(concussion_data$BMI_cat)
+concussion_data$blood_pressure<-factor(concussion_data$blood_pressure)
+concussion_data$race<-factor(concussion_data$race)
+concussion_data$ethnicity<-factor(concussion_data$ethnicity)
+concussion_data$gender<-factor(concussion_data$gender)
+#collapsing 5 binary mechanism variables into 1 multicategorical variable
+concussion_data$mechanism[concussion_data$fall == 1] <- "fall"
+concussion_data$mechanism[concussion_data$trauma == 1] <- "trauma"
+concussion_data$mechanism[concussion_data$MVA == 1] <- "MVA"
+concussion_data$mechanism[concussion_data$assault == 1] <- "assault"
+concussion_data$mechanism[concussion_data$sports == 1] <- "sports"
+#Recode BMI to be binary 
+concussion_data$binaryBMI[concussion_data$BMI_cat == 1 | concussion_data$BMI_cat == 2] <- 0
+concussion_data$binaryBMI[concussion_data$BMI_cat == 3 | concussion_data$BMI_cat == 4 | concussion_data$BMI_cat == 5] <- 1
+#recoding BP to binary 
+concussion_data$blood_pressure1[concussion_data$blood_pressure == 1] <- 0
+concussion_data$blood_pressure1[concussion_data$blood_pressure == 2] <- 0
+concussion_data$blood_pressure1[concussion_data$blood_pressure == 3] <- 1
+concussion_data$blood_pressure1[concussion_data$blood_pressure == 4] <- 1
+#creation of comprehensive hypertension variable
+concussion_data$BPhypertension[concussion_data$hypertension == 1 | concussion_data$blood_pressure1 == 1] <- 1
+concussion_data$BPhypertension[concussion_data$hypertension == 0 & concussion_data$blood_pressure1 == 0] <- 0
+concussion_data$BPhypertension<-factor(concussion_data$BPhypertension)
+#recoding race as binary for the regressions to use as needed
+concussion_data$recoderace[concussion_data$race == 2 | concussion_data$race == 3| concussion_data$race == 4| concussion_data$race == 5 | concussion_data$race == 6] <- 1
+concussion_data$recoderace[concussion_data$race == 1] <- 0
+
+#NOTE: checked out the race and ethnicity variables to see if we could recode as variable race_ethnicity (if n in each group > 10). From this, we could see that there are groups that are too small (n=3, and n=6), so we will forego merging these variables.  
+data <- table(concussion_data$race, concussion_data$ethnicity)
+```
+
+NOTE: The chunk below takes out influential points in the dataset. We discussed this at length, and decided to not include this in the final analysis
+```{r}
+post_con_syn_mod_hyp <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial")
+
+cooksD <- cooks.distance(post_con_syn_mod_hyp)
+n <- nrow(concussion_data)
+influential_obs <- as.numeric(names(cooksD)[(cooksD > (4/n))])
+influential_obs #29 influential points 
+outliers_removed_post_con_syn_hyp <- concussion_data[-influential_obs, ]
+
+cooksD <- cooks.distance(post_con_syn_mod_bmi)
+n <- nrow(concussion_data)
+influential_obs <- as.numeric(names(cooksD)[(cooksD > (4/n))])
+influential_obs #10 influential points 
+outliers_removed_post_con_syn_bmi <- concussion_data[-influential_obs, ]
+
+cooksD <- cooks.distance(post_con_syn_mod_bp)
+n <- nrow(concussion_data)
+influential_obs <- as.numeric(names(cooksD)[(cooksD > (4/n))])
+influential_obs #33 influential points 
+outliers_removed_post_con_syn_bp <- concussion_data[-influential_obs, ]
+```
+
+###Starting to look at, and understand our data###
+
+Writing out an excel dataset for PI use, which incorporates the above data management 
+```{r}
+write_xlsx(concussion_data, "CR_BMI_hypertension_data.xlsx")
+```
+
+Let's take a look at the cleaned dataset: 
+```{r}
+head(concussion_data, 10)
+```
+
+Next, lets take a look at the summary of the dataset (this code fives mean, median, quartiles, min and max): 
+```{r}
+summary(concussion_data)
+```
+
+For the continuous variables, let's visualize the distributions and get measures of central tendency and spread for these values: 
+```{r}
+#number of follow up visits
+mean(concussion_data$num_fu)
+var(concussion_data$num_fu)
+sd(concussion_data$num_fu) 
+boxplot(concussion_data$num_fu, main="Number of follow up visits") #Are outliers seen? 
+hist(concussion_data$num_fu) #What distribution does this take? 
+#As the data appears to have a poisson distribution, check for overdispersion: 
+aggregate(concussion_data$num_fu, list(concussion_data$BPhypertension), FUN=mean)
+aggregate(concussion_data$num_fu, list(concussion_data$binaryBMI), FUN=mean) 
+
+#days between injury and last follow up visit 
+mean(concussion_data$days_btwn_con_and_last_fu)
+var(concussion_data$days_btwn_con_and_last_fu)
+sd(concussion_data$days_btwn_con_and_last_fu)
+boxplot(concussion_data$days_btwn_con_and_last_fu, main="Number of follow up visits") #Are outliers seen? 
+hist(concussion_data$days_btwn_con_and_last_fu) #What distribution does this take? 
+#As the data appears to have a poisson distribution, check for overdispersion: 
+aggregate(concussion_data$days_btwn_con_and_last_fu, list(concussion_data$BPhypertension), FUN=mean) 
+aggregate(concussion_data$days_btwn_con_and_last_fu, list(concussion_data$binaryBMI), FUN=mean) 
+
+#age 
+mean(concussion_data$age, na.rm=TRUE)
+var(concussion_data$age, na.rm=TRUE)
+sd(concussion_data$age, na.rm=TRUE)
+boxplot(concussion_data$age, main="Age") 
+hist(concussion_data$age)
+
+#BMI value 
+mean(concussion_data$BMI_val, na.rm=TRUE)
+var(concussion_data$BMI_val, na.rm=TRUE)
+sd(concussion_data$BMI_val, na.rm=TRUE)
+boxplot(concussion_data$BMI_val, main="BMI_val") 
+hist(concussion_data$BMI_val)
+```
+
+Tests of normality for the continuous variables: (Because days and number of visits are count data, I imagine that these two variables will take a poisson distribution) 
+```{r}
+#if p<0.05, data is not normal
+shapiro.test(concussion_data$num_fu) 
+shapiro.test(concussion_data$days_btwn_con_and_last_fu) 
+shapiro.test(concussion_data$age) 
+shapiro.test(concussion_data$BMI_val) 
+```
+
+Now lets create some tables for the categorical variables, to understand their distribution better: 
+```{r}
+table1<- table(concussion_data$binaryBMI)
+prop.table(table1)
+table1<- table(concussion_data$BPhypertension)
+prop.table(table1)
+table1<- table(concussion_data$post_con_syn)
+prop.table(table1)
+table1<- table(concussion_data$fu_rec)
+prop.table(table1)
+table1<- table(concussion_data$clin_resolution)
+prop.table(table1)
+table1<- table(concussion_data$race)
+prop.table(table1)
+table1<- table(concussion_data$ethnicity)
+prop.table(table1)
+table1<- table(concussion_data$mechanism)
+prop.table(table1)
+table1<- table(concussion_data$gender)
+prop.table(table1)
+table1<- table(concussion_data$hypertension)
+table1
+prop.table(table1)
+table1<- table(concussion_data$binaryBMI)
+table1
+prop.table(table1)
+#table(column, row)
+table(concussion_data$post_con_syn, concussion_data$BPhypertension)
+table(concussion_data$post_con_syn, concussion_data$binaryBMI)
+```
+
+To get a better idea of how the outcome variables are distributed, let's visualize post concussion syndrome with the predictors, and facet on some covariates: 
+```{r}
+#raw 
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = post_con_syn, fill = BPhypertension), position = "dodge")
+
+#split between covariates (impossible to show age visually as a covariate because continuous)
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = blood_pressure, fill = post_con_syn), position = "dodge") + facet_wrap(~race)
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = blood_pressure, fill = post_con_syn), position = "dodge") + facet_wrap(~mechanism)
+```
+
+To get a better idea of how the outcome variables are distributed, let's visualize days_fu with the predictors, and facet on some covariates: 
+```{r}
+ggplot(data=concussion_data, mapping = aes(x = BPhypertension, y = days_btwn_con_and_last_fu)) + geom_boxplot() 
+
+#split between covariates (impossible to show covariate for age in visualizations because continuous)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = days_btwn_con_and_last_fu)) + geom_boxplot() + facet_wrap(~mechanism)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = days_btwn_con_and_last_fu)) + geom_boxplot() + facet_wrap(~race)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = days_btwn_con_and_last_fu)) + geom_boxplot() + facet_wrap(~ethnicity)
+```
+
+To get a better idea of how the outcome variables are distributed, let's visualize num_fu with the predictors, and facet on some covariates: 
+```{r}
+#raw 
+ggplot(data=concussion_data, mapping = aes(x = BPhypertension, y = num_fu)) + geom_boxplot() 
+
+#split between covariates (impossible to show covariate for age in visualizations because continuous)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = num_fu)) + geom_boxplot() + facet_wrap(~mechanism)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = num_fu)) + geom_boxplot() + facet_wrap(~race)
+ggplot(data=concussion_data, mapping = aes(x = blood_pressure, y = num_fu)) + geom_boxplot() + facet_wrap(~ethnicity)
+```
+
+To get a better idea of how the outcome variables are distributed, let's visualize fu_rec with the predictors, and facet on some covariates: 
+```{r}
+#raw 
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = BPhypertension, fill = fu_rec), position = "dodge")
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = fu_rec, fill = BPhypertension), position = "dodge")
+
+#split between covariates (impossible to show age visually as a covariate because continuous)
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = blood_pressure, fill = fu_rec), position = "dodge") + facet_wrap(~race)
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = blood_pressure, fill = fu_rec), position = "dodge") + facet_wrap(~mechanism)
+ggplot(data = concussion_data) + geom_bar(mapping = aes(x = blood_pressure, fill = fu_rec), position = "dodge") + facet_wrap(~ethnicity)
+```
+
+Let's create some more visualizations for the paper: 
+```{r}
+#Create a new dataset with no NAs 
+concussion_data <- na.omit(subset(concussion_data, select = c(days_btwn_con_and_last_fu, num_fu, BPhypertension, binaryBMI)))
+
+boxplot(concussion_data$days_btwn_con_and_last_fu, main="Days between concussion and last follow-up visit")
+boxplot(concussion_data$num_fu, main="Number of follow up visits")
+
+plot1 <- ggplot(concussion_data, aes(x = BPhypertension, y = days_btwn_con_and_last_fu)) +           
+  geom_boxplot() +
+  xlab("Hypertension (comprehensive definition)") + 
+  ylab("") + 
+  ggtitle("Days between concussion and last follow up visit") +
+  scale_x_discrete(breaks=c("0","1"),
+        labels=c("Non-hypertensive", "Hypertensive"))
+plot2 <- ggplot(concussion_data, aes(x = BPhypertension, y = num_fu)) +           
+  geom_boxplot()+
+  xlab("Hypertension (comprehensive definition)") + 
+  ylab("") + 
+  ggtitle("Numer of follow up visits") +
+  scale_x_discrete(breaks=c("0","1"),
+        labels=c("Non-hypertensive", "Hypertensive"))
+plot3 <- ggplot(concussion_data, aes(x = factor(binaryBMI), y = days_btwn_con_and_last_fu)) +           
+  geom_boxplot()+
+  xlab("BMI") + 
+  ylab("") + 
+  scale_x_discrete(breaks=c("0","1"),
+        labels=c("Non-elevated", "Elevated")) +
+  theme(axis.text.y = element_blank(), axis.ticks = element_blank())
+plot4 <- ggplot(concussion_data, aes(x = factor(binaryBMI), y = num_fu)) +           
+  geom_boxplot()+
+  xlab("BMI") + 
+  ylab("") + 
+  scale_x_discrete(breaks=c("0","1"),
+        labels=c("Non-elevated", "Elevated")) +
+  theme(axis.text.y = element_blank(), axis.ticks = element_blank())
+
+figure <- ggarrange(plot1, plot3, ggplot() + theme_void(), ggplot() + theme_void(), plot2, plot4,
+                    heights = c(6, 1, 6),
+                    nrow = 3, ncol=2)
+ggsave(figure, filename = "/Users/davidbuilder/Desktop/figure.png",height = 10, width = 7)
+```
+
+###Analysis###
+
+We first must ask if our sample was representative of the US general population. Our sample underrepresented hypertension and BMI. Other studies show that this could be because of variant rates of these illnesses in different genders. Thus, let us look at the relationship between gender and hypertension as well as gender and BMI to see if this might be contributing to our underrepresentation: 
+```{r}
+freq_data<-table(concussion_data$BPhypertension, concussion_data$gender)
+chisq.test(freq_data)
+prop.table(freq_data, margin=2)
+
+freq_data<-table(concussion_data$binaryBMI, concussion_data$gender)
+chisq.test(freq_data)
+prop.table(freq_data, margin=2)
+```
+
+To start data analysis, I will test binary correlations between variables. 
+
+I use this great website to help me choose which test to use, and then do some research on the side to confirm that I chose the right test:
+(<https://stats.oarc.ucla.edu/other/mult-pkg/whatstat/>)
+
+NOTE: It was decided that we will not use a bonferroni correction in this analysis. We will use a critical point of 0.05 for statistical significance. 
+
+From the following tests, we test for significant correlation between BPhypertension, preexisting hypertension, and BinaryBMI, and BMI value with post concussion syndrome. 
+```{r}
+#for post concussion syndrome 
+freq_data<-table(concussion_data$post_con_syn, concussion_data$BPhypertension) #exposure along the top, outcome along the side 
+chisq.test(freq_data) 
+freq_data<-table(concussion_data$post_con_syn, concussion_data$binaryBMI) #exposure along the top, outcome along the side 
+chisq.test(freq_data) 
+#fisher.test(table(concussion_data$BPhypertension, concussion_data$post_con_syn)) 
+#fisher.test(table(concussion_data$binaryBMI, concussion_data$post_con_syn))  
+summary(fit<-glm(post_con_syn ~ BMI_val, family=binomial, data=concussion_data))
+exp(fit$coefficients[2])
+freq_data<-table(concussion_data$post_con_syn, concussion_data$hypertension) 
+chisq.test(freq_data)
+```
+
+From the following tests, we test for significant correlation between days between concussion and last follow up and BPhypertension, preexisting hypertension, & BMI both if binary and continuous
+```{r}
+#for days_btwn_con_and_last_fu 
+wilcox.test(days_btwn_con_and_last_fu ~ BPhypertension, data=concussion_data)
+wilcox.test(days_btwn_con_and_last_fu ~ binaryBMI, data=concussion_data)
+cor.test(concussion_data$days_btwn_con_and_last_fu, concussion_data$BMI_val, method = "spearman") 
+wilcox.test(days_btwn_con_and_last_fu ~ hypertension, data=concussion_data) 
+summary(negbin.model<-glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data=concussion_data)) 
+exp(negbin.model$coefficients[2])
+summary(negbin.model<-glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data=concussion_data)) 
+exp(negbin.model$coefficients[2])
+```
+
+From the following tests, we test for significant correlation with hypertension and BMI depending on how we categorize BMI or hypertension
+```{r}
+#for follow up recommended 
+#freq_data3<-table(concussion_data$fu_rec, concussion_data$BPhypertension) 
+#chisq.test(freq_data3) 
+#fisher.test(table(concussion_data$BPhypertension, concussion_data$fu_rec))
+#fisher.test(table(concussion_data$binaryBMI, concussion_data$fu_rec)) 
+#fisher.test(table(concussion_data$hypertension, concussion_data$fu_rec)) 
+freq_data<-table(concussion_data$fu_rec, concussion_data$hypertension) 
+chisq.test(freq_data) 
+freq_data<-table(concussion_data$fu_rec, concussion_data$binaryBMI) 
+chisq.test(freq_data) 
+freq_data<-table(concussion_data$fu_rec, concussion_data$BPhypertension) 
+chisq.test(freq_data) #p-value = 0.09226
+summary(fit<-glm(fu_rec ~ BMI_val, family=binomial, data=concussion_data))
+exp(fit$coefficients[2])
+```
+
+From the following tests, we test for significant correlation between total number of follow up visits and hypertension and BMI categorized all ways we are looking at them.
+```{r}
+#For num_fu 
+wilcox.test(num_fu ~ BPhypertension, data=concussion_data) 
+wilcox.test(num_fu ~ binaryBMI, data=concussion_data)
+wilcox.test(num_fu ~ hypertension, data=concussion_data)
+cor.test(concussion_data$num_fu, concussion_data$BMI_val, method = "spearman") 
+summary(negbin.model<-glm.nb(num_fu ~ BPhypertension, data=concussion_data))
+exp(negbin.model$coefficients[2])
+with(negbin.model, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+#We conclude that the model fits reasonably well because the goodness-of-fit chi-squared test is not statistically significant. If the test had been statistically significant, it would indicate that the data do not fit the model well.
+summary(negbin.model<-glm.nb(num_fu ~ BMI_val, data=concussion_data))
+exp(negbin.model$coefficients[2])
+with(negbin.model, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+```
+
+Now let's see which variables are mathematically important covariates. If percentage change is > 10%, the variable was considered a confounder. Confounding was found for age in several instances, gender in one instance, as well as in race+ethnicity in the relationship between fu_rec and the predictors, and race in the relationship between num_fu and the predictors. 
+```{r}
+#Post concussion syndrome: 
+  #Age 
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binary BMI
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+  #Race 
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+  #Mechanism  
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+  #Ethnicity 
+    #BPhypertension 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+  #Gender 
+    #BPhypertension 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+
+#fu_rec
+#Age 
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BPhypertension + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BMI_val + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + age, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+  #Race 
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BPhypertension + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BMI_val + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + race, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+  #Mechanism  
+    #BPhypertension
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BPhypertension + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change 
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BMI_val + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + mechanism, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+  #Ethnicity 
+    #BPhypertension 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BPhypertension + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BMI_val + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + ethnicity, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+  #Gender 
+    #BPhypertension 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BPhypertension + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(post_con_syn_mod1 <- glm(fu_rec ~ BMI_val, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ BMI_val + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(post_con_syn_mod1 <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial"))
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + gender, data = concussion_data, family = "binomial"))
+Percentage_Change = (post_con_syn_mod1$coefficients[2] - post_con_syn_mod2$coefficients[2])/post_con_syn_mod1$coefficients[2]*100
+Percentage_Change
+
+#num_fu
+  #age 
+    #BPhypertension
+summary(mod1 <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BPhypertension + age, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(num_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BMI_val+ age, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #race
+    #BPhypertension
+summary(mod1 <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BPhypertension + race, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(num_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BMI_val+ race, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #mechanism
+    #BPhypertension
+summary(mod1 <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BPhypertension + mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(num_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BMI_val+ mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(mod1 <- glm.nb(num_fu ~ binaryBMI, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ binaryBMI+ mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #ethnicity
+    #BPhypertension
+summary(mod1 <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BPhypertension + ethnicity, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change 
+    #bmi val 
+summary(mod1 <- glm.nb(num_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BMI_val+ ethnicity, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change 
+  #Gender 
+    #BPhypertension 
+summary(mod1 <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BPhypertension + gender, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(mod1 <- glm.nb(num_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(num_fu ~ BMI_val + gender, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+
+#days_btwn_con_and_last_fu
+  #age 
+    #BPhypertension
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + age, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val+ age, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #race
+    #BPhypertension
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + race, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val+ race, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change 
+  #mechanism
+    #BPhypertension
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change# 
+    #bmi val 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val+ mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #binaryBMI
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ binaryBMI, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~binaryBMI+ mechanism, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #ethnicity
+    #BPhypertension
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + ethnicity, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #bmi val 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val+ ethnicity, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+  #Gender 
+    #BPhypertension 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + gender, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+    #BMI val 
+summary(mod1 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data = concussion_data))
+summary(mod2 <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + gender, data = concussion_data))
+Percentage_Change = (mod1$coefficients[2] - mod2$coefficients[2])/mod1$coefficients[2]*100
+Percentage_Change
+```
+
+Next, let's see if there is effect modification present: (here I will do a stratified analysis. If the stratum-specific measures of association are different than each other and the crude lies between them, then it is likely that the variable in question is an effect modifier). From this anlaysis, effect modification was found in race in the relationship between PCS and the predictors, gender in the relationship between days_between and the predictors, and race in the relationship berween fu_rec and the predictors. 
+```{r}
+#Post concussion syndrome 
+    #BPhypertension 
+        #age 
+#oddsratio.wald(concussion_data$BPhypertension,concussion_data$post_con_syn) #crude OR: 3.97 
+#old<-subset(concussion_data, age>=60)
+#young<-subset(concussion_data, age<60)
+#oddsratio.wald(old$BPhypertension,old$post_con_syn) #adjusted OR: 4.74
+#oddsratio.wald(young$BPhypertension,young$post_con_syn) #adjusted OR: 3.34 
+#this indicates effect modification due to age 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + age + BPhypertension*age, data = concussion_data, family = "binomial"))#interaction term not significant - does this conflict with the above finding of affect modification? 
+        #race 
+oddsratio.wald(concussion_data$BPhypertension,concussion_data$post_con_syn) #crude OR: 2.736801 
+white<-subset(concussion_data, race==1)
+black<-subset(concussion_data, race==2)
+asian<-subset(concussion_data, race==3)
+other<-subset(concussion_data, race==4 | race==5 | race==6 )
+oddsratio.wald(white$BPhypertension,white$post_con_syn) #OR: 3.677536 (CI = 1.9-6.9)
+oddsratio.wald(black$BPhypertension,black$post_con_syn) #OR: 0.3333333 (CI = 0.05-2.17) #this one seems to be significantly different from the crude 
+oddsratio.wald(other$BPhypertension,other$post_con_syn) #OR: 2.428571 (CI = 0.8-6.88)
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + race + BPhypertension*race, data = concussion_data, family = "binomial"))#Black group interaction term was significant - would we include this in the model as an effect modifier even tho black is so small? 
+        #ethnicity
+oddsratio.wald(concussion_data$BPhypertension,concussion_data$post_con_syn) #crude OR: 2.736801 
+hispanic<-subset(concussion_data, ethnicity==0)
+nonhispanic<-subset(concussion_data, ethnicity==1)
+oddsratio.wald(hispanic$BPhypertension,hispanic$post_con_syn) #OR: 2.657682 (CI = 1.507204-4.68634)
+oddsratio.wald(nonhispanic$BPhypertension,nonhispanic$post_con_syn) #OR: 7.714286 (CI = 0.74-79.99) 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + ethnicity + BPhypertension*ethnicity, data = concussion_data, family = "binomial"))#interaction term not significant
+        #mechanism 
+#oddsratio.wald(concussion_data$BPhypertension,concussion_data$post_con_syn) #crude OR: 2.736801 
+#fall<-subset(concussion_data, ethnicity=="fall")
+#trauma<-subset(concussion_data, ethnicity=="trauma")
+#MVA<-subset(concussion_data, ethnicity=="MVA")
+#assault<-subset(concussion_data, ethnicity=="assault")
+#sports<-subset(concussion_data, ethnicity=="sports")
+#oddsratio.wald(fall$BPhypertension,fall$post_con_syn)
+#oddsratio.wald(trauma$BPhypertension,trauma$post_con_syn)
+#oddsratio.wald(MVA$BPhypertension,MVA$post_con_syn)
+#oddsratio.wald(assault$BPhypertension,assault$post_con_syn)
+#oddsratio.wald(sports$BPhypertension,sports$post_con_syn)
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + mechanism + BPhypertension*mechanism, data = concussion_data, family = "binomial"))#interaction term not significant (borderline)
+        #gender 
+oddsratio.wald(concussion_data$BPhypertension,concussion_data$post_con_syn) #crude OR: 2.736801 
+male<-subset(concussion_data, gender==0)
+female<-subset(concussion_data, gender==1)
+oddsratio.wald(male$BPhypertension,male$post_con_syn) #OR: 3.617117 (CI = 1.61-8.1)
+oddsratio.wald(female$BPhypertension,female$post_con_syn) #OR: 2.331665 (CI = 1.25-4.33) 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BPhypertension + gender + BPhypertension*gender, data = concussion_data, family = "binomial")) #interaction term not significant
+    #bmi val 
+        #age 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ BMI_val + age + BMI_val*age, data = concussion_data, family = "binomial"))#interaction term not significant
+        #race
+summary(post_con_syn_mod2 <- glm(post_con_syn ~  BMI_val + race +  BMI_val*race, data = concussion_data, family = "binomial"))#interaction term not significant
+        #ethnicity
+summary(post_con_syn_mod2 <- glm(post_con_syn ~  BMI_val + ethnicity +  BMI_val*ethnicity, data = concussion_data, family = "binomial"))#interaction term not significant
+        #mechanism 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~  BMI_val + mechanism +  BMI_val*mechanism, data = concussion_data, family = "binomial"))#interaction term not significant
+        #gender
+summary(post_con_syn_mod2 <- glm(post_con_syn ~  BMI_val + gender +  BMI_val*gender, data = concussion_data, family = "binomial"))#interaction term not significant
+    #binaryBMI
+        #age 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + age + binaryBMI*age, data = concussion_data, family = "binomial")) #interaction term not significant 
+        #race 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$post_con_syn) #crude OR: 1.788889 
+white<-subset(concussion_data, race==1)
+black<-subset(concussion_data, race==2)
+asian<-subset(concussion_data, race==3)
+other<-subset(concussion_data, race==4 | race==5 | race==6 )
+oddsratio.wald(white$binaryBMI,white$post_con_syn) #OR: 1.723429 (CI = 0.9233895 3.216634)
+oddsratio.wald(black$binaryBMI,black$post_con_syn) #OR: 1.090909 (CI =0.1465147 8.122615) #this one seems to be significantly different from the crude 
+oddsratio.wald(asian$binaryBMI,asian$post_con_syn) #OR: 1.75 (CI = 0.09931311 30.83682)
+oddsratio.wald(other$binaryBMI,other$post_con_syn) #OR: 1.40625 (CI = 0.4420639 4.473423)
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + race + binaryBMI*race, data = concussion_data, family = "binomial"))#interaction term not significant
+        #ethnicity 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$post_con_syn) 
+hispanic<-subset(concussion_data, ethnicity==0)
+nonhispanic<-subset(concussion_data, ethnicity==1)
+oddsratio.wald(hispanic$binaryBMI,hispanic$post_con_syn) #OR: 1.630609 (CI = 0.9360742 2.840465)
+oddsratio.wald(nonhispanic$binaryBMI,nonhispanic$post_con_syn) #OR: 3.333333 (CI = 0.3076983 36.11041) 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + ethnicity + binaryBMI*ethnicity, data = concussion_data, family = "binomial"))#interaction term not significant
+        #mechanism 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + mechanism + binaryBMI*mechanism, data = concussion_data, family = "binomial"))#interaction term not significant 
+        #gender 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$post_con_syn) 
+male<-subset(concussion_data, gender==0)
+female<-subset(concussion_data, gender==1)
+oddsratio.wald(male$binaryBMI,male$post_con_syn) #OR: 1.145833 (CI = 0.5243071 2.504132)
+oddsratio.wald(female$binaryBMI,female$post_con_syn) #OR: 2.301003 (CI = 1.269979 4.169059) 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + gender + binaryBMI*gender, data = concussion_data, family = "binomial")) #interaction term not significant
+
+#Days between injury and follow up 
+    #BPhypertension
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + age + BPhypertension*age, data = concussion_data))#interaction term not significant
+        #race
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + race + BPhypertension*race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + ethnicity + BPhypertension*ethnicity, data = concussion_data))#interaction term not significant
+        #mechanism 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + mechanism + BPhypertension*mechanism, data = concussion_data))#interaction term not significant
+        #gender 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + gender + BPhypertension*gender, data = concussion_data))#interaction term not significant
+    #bmi val 
+        #age 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + age + BMI_val*age, data = concussion_data))#interaction term not significant
+        #race
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + race + BMI_val*race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + ethnicity + BMI_val*ethnicity, data = concussion_data))#interaction term not significant (borderline) 
+        #mechanism 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + mechanism + BMI_val*mechanism, data = concussion_data))#interaction term not significant
+        #gender
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ BMI_val + gender + BMI_val*gender, data = concussion_data))#interaction significant 
+    #binaryBMI 
+        #age 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ binaryBMI  + age + binaryBMI *age, data = concussion_data))#interaction term not significant
+        #race
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ binaryBMI  + race + binaryBMI *race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ binaryBMI  + ethnicity + binaryBMI *ethnicity, data = concussion_data))#interaction term not significant (borderline) 
+        #mechanism 
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~ binaryBMI  + mechanism + binaryBMI *mechanism, data = concussion_data))#interaction term not significant
+        #gender
+summary(days_btwn_mod <- glm.nb(days_btwn_con_and_last_fu ~binaryBMI  + gender + binaryBMI *gender, data = concussion_data))#interaction not significant 
+
+
+#num_fu 
+    #BPhypertension
+summary(num_fu_mod <- glm.nb(num_fu ~ BPhypertension + age + BPhypertension*age, data = concussion_data))#interaction term not significant
+        #race
+summary(num_fu_mod <- glm.nb(num_fu ~ BPhypertension + race + BPhypertension*race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(num_fu_mod <- glm.nb(num_fu ~ BPhypertension + ethnicity + BPhypertension*ethnicity, data = concussion_data))#interaction term not significant
+        #mechanism 
+summary(num_fu_mod <- glm.nb(num_fu ~ BPhypertension + mechanism + BPhypertension*mechanism, data = concussion_data))#interaction term not significant
+        #gender
+summary(num_fu_mod <- glm.nb(num_fu ~ BPhypertension + gender + BPhypertension*gender, data = concussion_data))#interaction term not significant
+    #bmi val 
+        #age 
+summary(num_fu_mod <- glm.nb(num_fu ~ BMI_val + age + BMI_val*age, data = concussion_data))#interaction term not significant
+        #race
+summary(num_fu_mod <- glm.nb(num_fu ~ BMI_val + race + BMI_val*race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(num_fu_mod <- glm.nb(num_fu ~ BMI_val + ethnicity + BMI_val*ethnicity, data = concussion_data))#interaction term not significant 
+        #mechanism 
+summary(num_fu_mod <- glm.nb(num_fu ~ BMI_val + mechanism + BMI_val*mechanism, data = concussion_data))#interaction term not significant
+        #gender
+summary(num_fu_mod <- glm.nb(num_fu ~ BMI_val + gender + BMI_val*gender, data = concussion_data))#interaction term not significant
+    #binaryBMI
+        #age 
+summary(num_fu_mod <- glm.nb(num_fu ~ binaryBMI + age + binaryBMI*age, data = concussion_data))#interaction term not significant
+        #race
+summary(num_fu_mod <- glm.nb(num_fu ~ binaryBMI + race + binaryBMI*race, data = concussion_data))#interaction term not significant
+        #ethnicity
+summary(num_fu_mod <- glm.nb(num_fu ~ binaryBMI + ethnicity + binaryBMI*ethnicity, data = concussion_data))#interaction term not significant 
+        #mechanism 
+summary(num_fu_mod <- glm.nb(num_fu ~ binaryBMI + mechanism + binaryBMI*mechanism, data = concussion_data))#interaction term not significant
+        #gender
+summary(num_fu_mod <- glm.nb(num_fu ~ binaryBMI+ gender + binaryBMI*gender, data = concussion_data))#interaction term not significant
+
+
+#fu_rec
+    #BPhypertension
+       #age
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + age + BPhypertension*age, data = concussion_data, family = "binomial"))#interaction not significant 
+        #race
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + race + BPhypertension*race, data = concussion_data, family = "binomial"))#interaction significant (for race 6 (other))
+oddsratio.wald(concussion_data$BPhypertension,concussion_data$fu_rec) #crude OR: 1.584615 
+white<-subset(concussion_data, race==1)
+black<-subset(concussion_data, race==2)
+other<-subset(concussion_data, race==3 | race==4 | race==5 | race==6 )
+oddsratio.wald(white$BPhypertension,white$fu_rec) #OR: 2.253036 (CI = 1.14-4.44)
+oddsratio.wald(black$BPhypertension,black$fu_rec) #OR: 0 #error here? 
+oddsratio.wald(other$BPhypertension,other$fu_rec) #OR: 0.7916667 (CI = 0.2-2.5)
+        #recoderace
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + recoderace +  BPhypertension*recoderace, data = concussion_data, family = "binomial"))#interaction borderline significant 
+oddsratio.wald(concussion_data$ BPhypertension,concussion_data$fu_rec) #crude OR: 1.584615
+white<-subset(concussion_data, race==1)
+other<-subset(concussion_data, race==2 |race==2 | race==4 | race==5 | race==6 )
+oddsratio.wald(white$ BPhypertension,white$fu_rec) #OR: 2.253036 (CI = 1.141217 4.448035)
+oddsratio.wald(other$ BPhypertension,other$fu_rec) #OR: 0.4166667 (CI = 0.1198519 1.448547)
+        #ethnicity
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + ethnicity + BPhypertension*ethnicity, data = concussion_data, family = "binomial"))#interaction not significant 
+        #mechanism 
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + mechanism + BPhypertension*mechanism, data = concussion_data, family = "binomial"))#interaction not significant 
+        #gender 
+summary(fu_rec_mod <- glm(fu_rec ~ BPhypertension + gender + BPhypertension*gender, data = concussion_data, family = "binomial"))#interaction not significant 
+    #binaryBMI
+       #age
+summary(fu_rec_mod <- glm(fu_rec ~ binaryBMI + age + binaryBMI*age, data = concussion_data, family = "binomial"))#interaction not significant 
+        #race
+summary(fu_rec_mod <- glm(fu_rec ~ binaryBMI + race + binaryBMI*race, data = concussion_data, family = "binomial"))#interaction not significant 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$fu_rec) #crude OR: 1.480877
+white<-subset(concussion_data, race==1)
+black<-subset(concussion_data, race==2)
+asian<-subset(concussion_data, race==3)
+other<-subset(concussion_data, race==4 | race==5 | race==6 )
+oddsratio.wald(white$binaryBMI,white$fu_rec) #OR: 1.406992 (CI = 0.7796161 2.539234)
+oddsratio.wald(black$binaryBMI,black$fu_rec) #0/NA output
+oddsratio.wald(asian$binaryBMI,asian$fu_rec) #NA/INF output 
+oddsratio.wald(other$binaryBMI,other$fu_rec) #OR: 0.4285714 (CI = 0.1086761 1.690101)
+        #recoderace
+summary(fu_rec_mod <- glm(fu_rec ~ binaryBMI + recoderace + binaryBMI*recoderace, data = concussion_data, family = "binomial"))#interaction not significant 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$fu_rec) #crude OR: 1.480877
+white<-subset(concussion_data, race==1)
+other<-subset(concussion_data, race==2 |race==2 | race==4 | race==5 | race==6 )
+oddsratio.wald(white$binaryBMI,white$fu_rec) #OR: 1.406992 (CI = 0.7796161 2.539234)
+oddsratio.wald(other$binaryBMI,other$fu_rec) #OR: 0.6206897 (CI = 0.1698289 2.268492)
+        #ethnicity
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$fu_rec) 
+hispanic<-subset(concussion_data, ethnicity==0)
+nonhispanic<-subset(concussion_data, ethnicity==1)
+oddsratio.wald(hispanic$binaryBMI,hispanic$fu_rec) #OR:  1.6969 (CI =  0.9479742 3.037747)
+oddsratio.wald(nonhispanic$binaryBMI,nonhispanic$fu_rec) #OR:0.4166667(CI = 0.03728278 4.656603) 
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + ethnicity + binaryBMI*ethnicity, data = concussion_data, family = "binomial"))#interaction term not significant
+        #mechanism 
+summary(post_con_syn_mod2 <- glm(post_con_syn ~ binaryBMI + mechanism + binaryBMI*mechanism, data = concussion_data, family = "binomial"))#interaction term not significant 
+        #gender 
+oddsratio.wald(concussion_data$binaryBMI,concussion_data$fu_rec) 
+male<-subset(concussion_data, gender==0)
+female<-subset(concussion_data, gender==1)
+oddsratio.wald(male$binaryBMI,male$fu_rec) 
+oddsratio.wald(female$binaryBMI,female$fu_rec) 
+summary(post_con_syn_mod2 <- glm(fu_rec ~ binaryBMI + gender + binaryBMI*gender, data = concussion_data, family = "binomial")) #interaction term not significant
+    #bmi val 
+        #age 
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + age + BMI_val*age, data = concussion_data, family = "binomial"))#interaction not significant 
+        #race
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + race + BMI_val*race, data = concussion_data, family = "binomial"))#interaction significant (for race 6 (other))
+        #recoderace
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + recoderace + BMI_val*recoderace, data = concussion_data, family = "binomial"))#interaction not sig
+        #ethnicity
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + ethnicity + BMI_val*ethnicity, data = concussion_data, family = "binomial"))#interaction not significant 
+        #mechanism 
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + mechanism + BMI_val*mechanism, data = concussion_data, family = "binomial"))#interaction not significant 
+        #gender 
+summary(fu_rec_mod <- glm(fu_rec ~ BMI_val + gender + BMI_val*gender, data = concussion_data, family = "binomial"))#interaction not significant (borderline)
+```
+
+exploring detials of EM found:
+```{r}
+#PCS
+freq_data<-table(white$post_con_syn, white$BPhypertension)
+prop.table(freq_data, margin=2)
+chisq.test(freq_data)
+freq_data<-table(black$post_con_syn, black$BPhypertension)
+freq_data
+prop.table(freq_data, margin=2)
+fisher.test(table(black$BPhypertension, black$post_con_syn))
+freq_data<-table(asian$post_con_syn, asian$BPhypertension)
+freq_data
+prop.table(freq_data, margin=2)
+fisher.test(table(asian$BPhypertension, asian$post_con_syn))
+freq_data<-table(other$post_con_syn, other$BPhypertension)
+freq_data
+prop.table(freq_data, margin=2)
+chisq.test(freq_data)
+
+#fu_rec
+freq_data<-table(white$fu_rec, white$BPhypertension)
+chisq.test(freq_data)
+freq_data<-table(black$fu_rec, black$BPhypertension)
+freq_data
+fisher.test(table(black$BPhypertension, black$fu_rec))
+freq_data<-table(asian$fu_rec, asian$BPhypertension)
+freq_data
+fisher.test(table(asian$BPhypertension, asian$fu_rec))
+freq_data<-table(other$fu_rec, other$BPhypertension)
+freq_data
+fisher.test(table(other$BPhypertension, other$fu_rec))
+```
+
+Now we will run regressions in order to characterize the data. 
+
+First, because regressions cannot take variables with different numbers of rows, I go through and delete all rows which have NAs. The final n for the data being used in these regressions is 267.
+```{r, include=FALSE}
+#because of NA issues, creating new dataset for regressions: 
+concussion_data <- concussion_data[,c(1,3,4,5,6,7,14,15,16,22,23,25)]
+head(concussion_data)
+concussion_data <- na.omit(concussion_data)
+nrow(concussion_data)
+
+#noticed significance when black is differentiated from other groups in race, so could recode race as black or other 
+#concussion_data$race[concussion_data$race==1 | concussion_data$race==3 | concussion_data$race==4 | concussion_data$race==5 | #concussion_data$race==6] <- 1
+
+```
+
+Regression for post concussion syndrome (multinomial/multiple logistic regression - multiple independent variables): 
+```{r}
+#first test univariate models 
+
+#PCS 
+summary(mod <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))#p-value = 0.000332, OR = 2.78984
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial")) #p-value = 0.00272, OR = 1.078748 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ age, data = concussion_data, family = "binomial"))#p-value = 0.0247, OR = 1.018687 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ race, data = concussion_data, family = "binomial"))#most significant p-value = 0.0287 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ ethnicity, data = concussion_data, family = "binomial"))#p-value = 0.72, OR = 1.2 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ mechanism, data = concussion_data, family = "binomial"))#most significant p-value = 0.00205
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ gender, data = concussion_data, family = "binomial"))#p-value = 0.876, OR = 0.9556589  
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#fu_rec
+summary(mod <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))#p-value = 0.000332, OR = 2.78984
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial")) #p-value = 0.00272, OR = 1.078748 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ age, data = concussion_data, family = "binomial"))#p-value = 0.0247, OR = 1.018687 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ recoderace, data = concussion_data, family = "binomial"))#most significant p-value = 0.0287 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ ethnicity, data = concussion_data, family = "binomial"))#p-value = 0.72, OR = 1.2 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ mechanism, data = concussion_data, family = "binomial"))#most significant p-value = 0.00205
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ gender, data = concussion_data, family = "binomial"))#p-value = 0.876, OR = 0.9556589  
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#num_fu
+summary(mod <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ binaryBMI, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ age, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ race, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ ethnicity, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ mechanism, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ gender, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#days_btwn
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu~ binaryBMI, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ age, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ race, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ ethnicity, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ mechanism, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ gender, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+```
+
+Trying to run regressions: 
+```{r}
+#in these models, we will include age, gender, race, ethnicity across the board (literature review)
+#next select variables with p < 0.20 (some generous p-value), main effects model proposed 
+
+#PCS
+#full model 
+full_model_PCS <- glm(post_con_syn ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = concussion_data, family = "binomial") 
+round(exp(full_model_PCS$coefficients), digits=2)
+round(exp(confint(full_model_PCS)), digits=2)
+#step model
+summary(step.model <- stepAIC(full_model_PCS, direction = "backward", trace = FALSE))
+#hypertension and mechanism are included
+#My final proposed model: 
+summary(mymodel <- glm(post_con_syn ~ BPhypertension + BMI_val + mechanism + race + age + ethnicity + race*BPhypertension, family = "binomial", data = concussion_data))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 2.515888  
+exp(mymodel$coefficients[3])
+#OR bmi val: 1.036623
+#My proposed final model here is not that different from the step model (in terms of coefficient for hypertension). and BPhypertension coefficient in neither is significant. What do we do here? BMI val coefficient also did not change that much, but we see that in step model it is significant and not in mymodel. From all the correlations above, it is clear that hypertension is super related to the outcome of PCS, but maybe after controlling for confounders, BMI is actually more strongly associated??? 
+#My model with binaryBMI:
+summary(mymodel <- glm(factor(post_con_syn) ~ factor(BPhypertension) + factor(binaryBMI) + mechanism + factor(race) + age + factor(ethnicity) + factor(gender) + factor(race)*factor(BPhypertension), family = "binomial", data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+
+#fu_rec 
+#full model 
+full_model_fu_rec <- glm(fu_rec ~ BPhypertension + binaryBMI + age + mechanism + recoderace + ethnicity +gender, data = concussion_data, family = "binomial") 
+summary(full_model_fu_rec)
+round(exp(full_model_fu_rec$coefficients), digits=2)
+round(exp(confint(full_model_fu_rec)), digits=2)
+    #recieved error message here for race2 (https://stats.oarc.ucla.edu/other/mult-pkg/faq/general/faqwhat-is-complete-or-quasi-complete-separation-in-logisticprobit-regression-and-how-do-we-deal-with-them/)
+    #so, will brak down race into binary to get around this
+#step model 
+summary(step.model <- stepAIC(full_model_fu_rec, direction = "backward", trace = FALSE))
+exp(step.model$coefficients[2])
+#My final proposed model:  
+summary(mymodel <- glm(fu_rec ~ BPhypertension + binaryBMI + recoderace + age + ethnicity + mechanism + gender + recoderace*BPhypertension, family = "binomial", data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+
+
+#num_fu 
+#full model
+summary(full_model_num_fu <- glm.nb(num_fu ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = concussion_data))
+round(exp(full_model_num_fu$coefficients), digits=2)
+round(exp(confint(full_model_num_fu)), digits=2)
+#step model
+summary(step.model <- stepAIC(full_model_num_fu, direction = "backward", trace = FALSE))
+#final model from stepAIC: 
+summary(glm.nb(num_fu ~ BPhypertension + age + mechanism, data = concussion_data))
+exp(step.model$coefficients[2])
+#ORhypertension = 1.59546
+#My final proposed model:  
+summary(mymodel <- glm.nb(num_fu ~ BPhypertension + BMI_val + race + age + gender, data = concussion_data))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 1.687415  
+exp(mymodel$coefficients[3])
+#OR BMIval: 1.006583
+#This one is interesting because my proposed model is very different than the stepAIC model - BMI value is not showing up as significant. Rachel, can you provide guidance? 
+#My model with binaryBMI:
+summary(mymodel <- glm.nb(num_fu ~ factor(BPhypertension) + factor(binaryBMI) + factor(race) + factor(ethnicity) + age + factor(gender), data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+#there are zeros here, so lets check for zero inflation to see if a zero inflation model would fit better
+check_zeroinflation(mymodel, tolerance = 0.05) 
+# The tolerance for the ratio of observed and predicted zeros to considered as over- or underfitting zeros. A ratio between 1 +/- tolerance is considered as OK, while a ratio beyond or below this threshold would indicate over- or underfitting. - we got 1.05, which is just OK so we can go ahead with regular neg. binomial model
+#Other functions to check model assumptions and and assess model quality: check_autocorrelation(), check_collinearity(), check_convergence(), check_heteroscedasticity(), check_homogeneity(), check_model(), check_outliers(), check_overdispersion(), check_predictions(), check_singularity()
+
+#days_btwn_con_and_last_fu
+#full model 
+summary(full_model_days <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = concussion_data))
+round(exp(full_model_days$coefficients), digits=2)
+round(exp(confint(full_model_days)), digits=2)
+#step model 
+summary(step.model <- stepAIC(full_model_days, direction = "backward", trace = FALSE))
+#final model: 
+summary(rmodel<- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + age + mechanism, data = concussion_data))
+exp(step.model$coefficients[2])
+#ORhypertension = 1.472121 
+#My final proposed model: 
+summary(mymodel <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + BMI_val + age + gender + gender*BMI_val, data = concussion_data))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 1.457862  
+exp(mymodel$coefficients[3])
+#OR BMIval: 1.025174 
+#This one is interesting because my proposed model is very different than the stepAIC model - BMI value is not showing up as significant. Rachel, can you provide guidance? 
+#My model with binaryBMI:
+summary(mymodel <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + binaryBMI + age + race + ethnicity + gender, data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+```
+
+```{r}
+#check for multicollinearity 
+#condition index method
+x2 <- model.matrix(mymodel)[,-1] 
+e2 <- eigen(t(x2) %*% x2)
+e2$val
+sqrt(e2$val[1] / e2$val)
+require(faraway) 
+vif(x2)
+#is there evidence of multicollinearity because many of these condition numbers are over 30 for the condition index method, and the mechanisms variables have the highest VIFs (but not over 5)??? 
+
+#hosmer-lemeshow test of goodness of fit 
+hltest(mymodel) #p-value =  0.48537, no evidence this model is not a good fit 
+hltest(rmodel) #p-value =  0.69559 , no evidence this model is not a good fit
+
+#LRT to see which model is better 
+anova <- anova(mymodel, rmodel)
+names(anova)
+anova
+1-pchisq(anova$Deviance, anova$Df) 
+
+#after backwards elimination, add back in confouders and potentially add in interaction terms 
+
+#AUC curve 
+rocplot1<-(roc(post_con_syn~fitted(mymodel), data=concussion_data))
+plot.roc(rocplot1, legacy.axes=TRUE)
+auc(rocplot1)#0.726 
+rocplot2<-(roc(post_con_syn~fitted(rmodel), data=concussion_data))
+plot.roc(rocplot2, legacy.axes=TRUE)
+auc(rocplot2)#0.7125 
+
+```
+
+Tried doing survival analysis, but it was decided that this was not possible with this dataset:
+```{r}
+fit <- survfit(Surv(days_btwn_con_and_last_fu, fu_rec) ~ BPhypertension, data=concussion_data)
+fit 
+plot(fit, lty = 2:3)
+``` 
+
+For table 2 in paper
+```{r}
+#############################PCS#############################
+table1 <- table(concussion_data$BPhypertension, concussion_data$post_con_syn)
+table1
+round(prop.table(table1), digits=4)*100
+
+table1 <- table(concussion_data$hypertension, concussion_data$post_con_syn)
+table1
+round(prop.table(table1), digits=4)*100
+
+mean1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$post_con_syn),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$post_con_syn),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$post_con_syn),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$post_con_syn),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+table1 <- table(concussion_data$binaryBMI, concussion_data$post_con_syn)
+table1
+round(prop.table(table1), digits=4)*100
+
+#############################fu_rec#############################
+table1 <- table(concussion_data$BPhypertension, concussion_data$fu_rec)
+table1
+round(prop.table(table1), digits=4)*100
+
+table1 <- table(concussion_data$hypertension, concussion_data$fu_rec)
+table1
+round(prop.table(table1), digits=4)*100
+
+mean1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$fu_rec),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$fu_rec),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$fu_rec),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$BMI_val,               
+          by = list(concussion_data$fu_rec),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+table1 <- table(concussion_data$binaryBMI, concussion_data$fu_rec)
+table1
+round(prop.table(table1), digits=4)*100
+
+#############################number of visits#############################
+mean1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+mean1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+mean1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$num_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+#############################days between#############################
+mean1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$BPhypertension),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+mean1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$hypertension),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+mean1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = mean, na.rm=TRUE) 
+colnames(mean1)[2] ="mean"
+sd1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = sd, na.rm=TRUE)
+colnames(sd1)[2] ="sd"
+min1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = min, na.rm=TRUE) 
+colnames(min1)[2] ="min"
+max1 <- aggregate(x = concussion_data$days_btwn_con_and_last_fu,               
+          by = list(concussion_data$binaryBMI),  
+          FUN = max, na.rm=TRUE) 
+colnames(max1)[2] ="max"
+merge1 <- merge(mean1, sd1)
+merge2 <- merge(min1, max1)
+merge(merge1, merge2)
+
+```
+
+After all of this initial analysis was done for the first paper, after getting the reviews from the rejection, we decided to re-run analysis with a new (smaller) n which includes only individuals who had a resolution of sx at the concussion center 
+```{r}
+################################################################################################################Limiting dataset to the new cohort - only those that have completed follow-up 
+dat <- concussion_data[concussion_data$fu_rec==0,]
+
+################################################################################################################For the continuous variables, let's visualize the distributions and get measures of central tendency and spread for these values: 
+#number of follow up visits
+mean(dat$num_fu)
+var(dat$num_fu)
+sd(dat$num_fu) 
+range(dat$num_fu)
+#check for overdispersion (compare below to the var)
+aggregate(dat$num_fu, list(dat$BPhypertension), FUN=mean)
+aggregate(dat$num_fu, list(dat$BPhypertension), FUN=sd)
+aggregate(dat$num_fu, list(dat$BPhypertension), FUN=range)
+aggregate(dat$num_fu, list(dat$binaryBMI), FUN=mean) 
+aggregate(dat$num_fu, list(dat$binaryBMI), FUN=sd) 
+aggregate(dat$num_fu, list(dat$binaryBMI), FUN=range) 
+aggregate(dat$num_fu, list(dat$hypertension), FUN=mean) 
+aggregate(dat$num_fu, list(dat$hypertension), FUN=sd) 
+aggregate(dat$num_fu, list(dat$hypertension), FUN=range) 
+
+#days between injury and last follow up visit 
+mean(dat$days_btwn_con_and_last_fu)
+var(dat$days_btwn_con_and_last_fu)
+sd(dat$days_btwn_con_and_last_fu)
+range(dat$days_btwn_con_and_last_fu)
+#check for overdispersion (compare below to the var)
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$BPhypertension), FUN=mean)
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$BPhypertension), FUN=sd)
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$BPhypertension), FUN=range)
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$binaryBMI), FUN=mean) 
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$binaryBMI), FUN=sd) 
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$binaryBMI), FUN=range) 
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$hypertension), FUN=mean) 
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$hypertension), FUN=sd) 
+aggregate(dat$days_btwn_con_and_last_fu, list(dat$hypertension), FUN=range) 
+
+#age 
+mean(dat$age, na.rm=TRUE)
+var(dat$age, na.rm=TRUE)
+sd(dat$age, na.rm=TRUE)
+range(dat$age, na.rm=TRUE)
+
+#BMI value 
+mean(dat$BMI_val, na.rm=TRUE)
+var(dat$BMI_val, na.rm=TRUE)
+sd(dat$BMI_val, na.rm=TRUE)
+range(dat$BMI_val, na.rm=TRUE)
+aggregate(dat$BMI_val, list(dat$post_con_syn), FUN=mean, na.rm=TRUE) 
+aggregate(dat$BMI_val, list(dat$post_con_syn), FUN=sd, na.rm=TRUE) 
+aggregate(dat$BMI_val, list(dat$post_con_syn), FUN=range, na.rm=TRUE) 
+
+################################################################################################################Tests of normality for the continuous variables: (Because days and number of visits are count data, I imagine that these two variables will take a poisson distribution) 
+#if p<0.05, data is not normal
+shapiro.test(dat$num_fu) #not normal
+shapiro.test(dat$days_btwn_con_and_last_fu) #not normal
+shapiro.test(dat$age) #not normal
+shapiro.test(dat$BMI_val) #not normal
+
+################################################################################################################Now lets create some tables for the categorical variables, to understand their distribution better: 
+table1<- table(dat$binaryBMI,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$BPhypertension,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$post_con_syn,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$race,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$ethnicity,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$mechanism,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$gender,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+table1<- table(dat$hypertension,useNA = "ifany")
+table1
+round(prop.table(table1)*100,digits=1)
+
+#table(side is first variable, top is second variable)
+table1 <- table(dat$post_con_syn, dat$BPhypertension)
+table1
+round(prop.table(table1)*100,digits=1)
+table1 <- table(dat$post_con_syn, dat$binaryBMI)
+table1
+round(prop.table(table1)*100,digits=1)
+table1 <- table(dat$post_con_syn, dat$hypertension)
+table1
+round(prop.table(table1)*100,digits=1)
+
+###################################################################################################################Analysis###
+#We first must ask if our sample was representative of the US general population. Our sample underrepresented hypertension and BMI. Other studies show that this could be because of variant rates of these illnesses in different genders. Thus, let us look at the relationship between gender and hypertension as well as gender and BMI to see if this might be contributing to our underrepresentation: 
+freq_data<-table(dat$BPhypertension, dat$gender)
+chisq.test(freq_data)
+prop.table(freq_data, margin=2)
+freq_data<-table(dat$binaryBMI, dat$gender)
+chisq.test(freq_data)
+prop.table(freq_data, margin=2)
+
+
+################################################################################################################To start data analysis, I will test binary correlations between variables. 
+#I use this great website to help me choose which test to use, and then do some research on the side to confirm that I chose the right test:
+#(<https://stats.oarc.ucla.edu/other/mult-pkg/whatstat/>)
+#NOTE: It was decided that we will not use a bonferroni correction in this analysis. We will use a critical point of 0.05 for statistical significance. 
+#From the following tests, we test for significant correlation between BPhypertension, preexisting hypertension, and BinaryBMI, and BMI value with post concussion syndrome. 
+#for post concussion syndrome 
+freq_data<-table(dat$post_con_syn, dat$BPhypertension) #exposure along the top, outcome along the side 
+chisq.test(freq_data) 
+freq_data<-table(dat$post_con_syn, dat$binaryBMI) #exposure along the top, outcome along the side 
+chisq.test(freq_data) 
+#fisher.test(table(dat$BPhypertension, dat$post_con_syn)) 
+#fisher.test(table(dat$binaryBMI, dat$post_con_syn))  
+summary(fit<-glm(post_con_syn ~ BMI_val, family=binomial, data=dat))
+exp(fit$coefficients[2])
+freq_data<-table(dat$post_con_syn, dat$hypertension) 
+fisher.test(freq_data)
+
+################################################################################################################From the following tests, we test for significant correlation between days between concussion and last follow up and BPhypertension, preexisting hypertension, & BMI both if binary and continuous
+#for days_btwn_con_and_last_fu 
+wilcox.test(days_btwn_con_and_last_fu ~ BPhypertension, data=dat)
+wilcox.test(days_btwn_con_and_last_fu ~ binaryBMI, data=dat)
+cor.test(dat$days_btwn_con_and_last_fu, dat$BMI_val, method = "spearman") 
+wilcox.test(days_btwn_con_and_last_fu ~ hypertension, data=dat) 
+summary(negbin.model<-glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data=dat)) 
+exp(negbin.model$coefficients[2])
+summary(negbin.model<-glm.nb(days_btwn_con_and_last_fu ~ BMI_val, data=dat)) 
+exp(negbin.model$coefficients[2])
+
+################################################################################################################From the following tests, we test for significant correlation between total number of follow up visits and hypertension and BMI categorized all ways we are looking at them.
+#For num_fu 
+wilcox.test(num_fu ~ BPhypertension, data=dat) 
+wilcox.test(num_fu ~ binaryBMI, data=dat)
+wilcox.test(num_fu ~ hypertension, data=dat)
+cor.test(dat$num_fu, dat$BMI_val, method = "spearman") 
+summary(negbin.model<-glm.nb(num_fu ~ BPhypertension, data=dat))
+exp(negbin.model$coefficients[2])
+with(negbin.model, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+#We conclude that the model fits reasonably well because the goodness-of-fit chi-squared test is not statistically significant. If the test had been statistically significant, it would indicate that the data do not fit the model well.
+summary(negbin.model<-glm.nb(num_fu ~ BMI_val, data=dat))
+exp(negbin.model$coefficients[2])
+with(negbin.model, cbind(res.deviance = deviance, df = df.residual,
+  p = pchisq(deviance, df.residual, lower.tail=FALSE)))
+```
+
+First, because regressions cannot take variables with different numbers of rows, I go through and delete all rows which have NAs. The final n for the data being used in these regressions is 267.
+```{r, include=FALSE}
+#because of NA issues, creating new dataset for regressions: 
+concussion_data <- concussion_data[,c(1,3,4,5,6,7,14,15,16,22,23,25)]
+head(concussion_data)
+concussion_data <- na.omit(concussion_data)
+nrow(concussion_data)
+
+#noticed significance when black is differentiated from other groups in race, so could recode race as black or other 
+#concussion_data$race[concussion_data$race==1 | concussion_data$race==3 | concussion_data$race==4 | concussion_data$race==5 | #concussion_data$race==6] <- 1
+
+```
+
+Regression for post concussion syndrome (multinomial/multiple logistic regression - multiple independent variables): 
+```{r}
+#first test univariate models 
+
+#PCS 
+summary(mod <- glm(post_con_syn ~ BPhypertension, data = concussion_data, family = "binomial"))#p-value = 0.000332, OR = 2.78984
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ binaryBMI, data = concussion_data, family = "binomial")) #p-value = 0.00272, OR = 1.078748 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ age, data = concussion_data, family = "binomial"))#p-value = 0.0247, OR = 1.018687 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(post_con_syn ~ race, data = concussion_data, family = "binomial"))#most significant p-value = 0.0287 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ ethnicity, data = concussion_data, family = "binomial"))#p-value = 0.72, OR = 1.2 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ mechanism, data = concussion_data, family = "binomial"))#most significant p-value = 0.00205
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(post_con_syn ~ gender, data = concussion_data, family = "binomial"))#p-value = 0.876, OR = 0.9556589  
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#fu_rec
+summary(mod <- glm(fu_rec ~ BPhypertension, data = concussion_data, family = "binomial"))#p-value = 0.000332, OR = 2.78984
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ binaryBMI, data = concussion_data, family = "binomial")) #p-value = 0.00272, OR = 1.078748 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ age, data = concussion_data, family = "binomial"))#p-value = 0.0247, OR = 1.018687 
+exp(mod$coefficients[2])
+exp(confint(mod))
+summary(mod <- glm(fu_rec ~ recoderace, data = concussion_data, family = "binomial"))#most significant p-value = 0.0287 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ ethnicity, data = concussion_data, family = "binomial"))#p-value = 0.72, OR = 1.2 
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ mechanism, data = concussion_data, family = "binomial"))#most significant p-value = 0.00205
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm(fu_rec ~ gender, data = concussion_data, family = "binomial"))#p-value = 0.876, OR = 0.9556589  
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#num_fu
+summary(mod <- glm.nb(num_fu ~ BPhypertension, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ binaryBMI, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ age, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ race, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ ethnicity, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ mechanism, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(num_fu ~ gender, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+
+#days_btwn
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu~ binaryBMI, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ age, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ race, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ ethnicity, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ mechanism, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+summary(mod <- glm.nb(days_btwn_con_and_last_fu ~ gender, data = concussion_data))
+round(exp(mod$coefficients), digits=2)
+round(exp(confint(mod)), digits=2)
+```
+
+Trying to run regressions: 
+```{r}
+#in these models, we will include age, gender, race, ethnicity across the board (literature review)
+#next select variables with p < 0.20 (some generous p-value), main effects model proposed 
+
+#because of NA issues, creating new dataset for regressions: 
+dat <- dat[,c(1,3,4,5,6,7,14,15,16,22,23,25)]
+head(dat)
+dat <- na.omit(dat)
+nrow(dat)
+
+#PCS
+#full model 
+full_model_PCS <- glm(post_con_syn ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = dat, family = "binomial") 
+round(exp(full_model_PCS$coefficients), digits=2)
+round(exp(confint(full_model_PCS)), digits=2)
+#step model
+summary(step.model <- stepAIC(full_model_PCS, direction = "backward", trace = FALSE))
+#hypertension and mechanism are included
+#My final proposed model: 
+summary(mymodel <- glm(post_con_syn ~ BPhypertension + BMI_val + mechanism + race + age + ethnicity + race*BPhypertension, family = "binomial", data = dat))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 2.515888  
+exp(mymodel$coefficients[3])
+#OR bmi val: 1.036623
+#My proposed final model here is not that different from the step model (in terms of coefficient for hypertension). and BPhypertension coefficient in neither is significant. What do we do here? BMI val coefficient also did not change that much, but we see that in step model it is significant and not in mymodel. From all the correlations above, it is clear that hypertension is super related to the outcome of PCS, but maybe after controlling for confounders, BMI is actually more strongly associated??? 
+#My model with binaryBMI:
+summary(mymodel <- glm(factor(post_con_syn) ~ factor(BPhypertension) + factor(binaryBMI) + mechanism + factor(race) + age + factor(ethnicity) + factor(gender) + factor(race)*factor(BPhypertension), family = "binomial", data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+
+#num_fu 
+#full model
+summary(full_model_num_fu <- glm.nb(num_fu ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = concussion_data))
+round(exp(full_model_num_fu$coefficients), digits=2)
+round(exp(confint(full_model_num_fu)), digits=2)
+#step model
+summary(step.model <- stepAIC(full_model_num_fu, direction = "backward", trace = FALSE))
+#final model from stepAIC: 
+summary(glm.nb(num_fu ~ BPhypertension + age + mechanism, data = concussion_data))
+exp(step.model$coefficients[2])
+#ORhypertension = 1.59546
+#My final proposed model:  
+summary(mymodel <- glm.nb(num_fu ~ BPhypertension + BMI_val + race + age + gender, data = concussion_data))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 1.687415  
+exp(mymodel$coefficients[3])
+#OR BMIval: 1.006583
+#This one is interesting because my proposed model is very different than the stepAIC model - BMI value is not showing up as significant. Rachel, can you provide guidance? 
+#My model with binaryBMI:
+summary(mymodel <- glm.nb(num_fu ~ factor(BPhypertension) + factor(binaryBMI) + factor(race) + factor(ethnicity) + age + factor(gender), data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+#there are zeros here, so lets check for zero inflation to see if a zero inflation model would fit better
+check_zeroinflation(mymodel, tolerance = 0.05) 
+# The tolerance for the ratio of observed and predicted zeros to considered as over- or underfitting zeros. A ratio between 1 +/- tolerance is considered as OK, while a ratio beyond or below this threshold would indicate over- or underfitting. - we got 1.05, which is just OK so we can go ahead with regular neg. binomial model
+#Other functions to check model assumptions and and assess model quality: check_autocorrelation(), check_collinearity(), check_convergence(), check_heteroscedasticity(), check_homogeneity(), check_model(), check_outliers(), check_overdispersion(), check_predictions(), check_singularity()
+
+#days_btwn_con_and_last_fu
+#full model 
+summary(full_model_days <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + binaryBMI + age + mechanism + race + ethnicity +gender, data = concussion_data))
+round(exp(full_model_days$coefficients), digits=2)
+round(exp(confint(full_model_days)), digits=2)
+#step model 
+summary(step.model <- stepAIC(full_model_days, direction = "backward", trace = FALSE))
+#final model: 
+summary(rmodel<- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + age + mechanism, data = concussion_data))
+exp(step.model$coefficients[2])
+#ORhypertension = 1.472121 
+#My final proposed model: 
+summary(mymodel <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + BMI_val + age + gender + gender*BMI_val, data = concussion_data))
+exp(mymodel$coefficients[2])
+#OR BPhypertension: 1.457862  
+exp(mymodel$coefficients[3])
+#OR BMIval: 1.025174 
+#This one is interesting because my proposed model is very different than the stepAIC model - BMI value is not showing up as significant. Rachel, can you provide guidance? 
+#My model with binaryBMI:
+summary(mymodel <- glm.nb(days_btwn_con_and_last_fu ~ BPhypertension + binaryBMI + age + race + ethnicity + gender, data = concussion_data))
+round(exp(mymodel$coefficients), digits=2)
+round(exp(confint(mymodel)), digits=2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
